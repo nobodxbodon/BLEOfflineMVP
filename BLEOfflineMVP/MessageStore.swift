@@ -36,7 +36,7 @@ final class MessageStore {
 
     // MARK: - CRUD
 
-    /// Load all persisted messages, sorted newest-first.
+    /// Load all persisted messages in insertion order.
     func loadMessages() -> [Message] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             return []
@@ -44,8 +44,7 @@ final class MessageStore {
 
         do {
             let data = try Data(contentsOf: fileURL)
-            let messages = try decoder.decode([Message].self, from: data)
-            return messages.sorted { $0.timestamp > $1.timestamp }
+            return try decoder.decode([Message].self, from: data)
         } catch {
             print("[MessageStore] Failed to load: \(error.localizedDescription)")
             return []
@@ -69,7 +68,6 @@ final class MessageStore {
             return messages
         }
         messages.append(message)
-        messages.sort { $0.timestamp > $1.timestamp }
         saveMessages(messages)
         return messages
     }

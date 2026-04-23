@@ -12,13 +12,15 @@ import MultipeerConnectivity
 // MARK: - Chat View Model
 
 /// Central coordinator for the messaging feature.
-/// Owns the connectivity service and message store,
-/// handles compose → queue → send → receive → display flow.
+/// Manages the in-memory messages array as the single source of truth,
+/// persists to disk on every change, and handles the
+/// compose → queue → send → receive → display flow.
 @MainActor
 final class ChatViewModel: ObservableObject {
 
     // MARK: - Published UI State
 
+    /// All messages, always sorted chronologically (oldest first → newest last).
     @Published var messages: [Message] = []
     @Published var composeText: String = ""
     @Published private(set) var connectionState: ConnectivityService.ConnectionState = .idle
@@ -29,6 +31,9 @@ final class ChatViewModel: ObservableObject {
     let connectivity: ConnectivityService
     private let store: MessageStore
     private var cancellables = Set<AnyCancellable>()
+
+    /// Set of message IDs we already have, for O(1) dedup.
+    private var knownMessageIDs: Set<UUID> = []
 
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -48,8 +53,10 @@ final class ChatViewModel: ObservableObject {
         self.connectivity = ConnectivityService()
         self.store = MessageStore()
 
-        // Load persisted messages
-        messages = store.loadMessages()
+        // Load persisted messages (already sorted oldest-first by store)
+        let loaded = store.loadMessages()
+        self.messages = loaded
+        self.knownMessageIDs = Set(loaded.map(\.id))
 
         setupObservers()
         connectivity.start()
@@ -88,6 +95,34 @@ final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    // MARK: - In-Memory Array Helpers
+
+    /// Insert a message into the array at the correct chronological position.
+    /// Returns true if the message was new, false if it was a duplicate.
+    @discardableResult
+    private func insertMessage(_ message: Message) -> Bool {
+        // Dedup
+        guard !knownMessageIDs.contains(message.id) else { return false }
+
+        knownMessageIDs.insert(message.id)
+        messages.append(message)
+        persistToDisk()
+        return true
+    }
+
+    /// Update status of a message in-place without re-reading from disk.
+    private func updateMessageStatus(id: UUID, to status: Message.DeliveryStatus) {
+        if let idx = messages.firstIndex(where: { $0.id == id }) {
+            messages[idx].status = status
+            persistToDisk()
+        }
+    }
+
+    /// Save current in-memory messages to disk (fire-and-forget).
+    private func persistToDisk() {
+        store.saveMessages(messages)
+    }
+
     // MARK: - Compose & Send
 
     /// Called when the user taps "Send".
@@ -102,13 +137,14 @@ final class ChatViewModel: ObservableObject {
             status: .queued
         )
 
-        // Persist locally
-        messages = store.appendMessage(message)
         composeText = ""
+
+        // Add to in-memory array
+        insertMessage(message)
 
         // Attempt immediate send if peers are connected
         if connectedPeerCount > 0 {
-            sendSingleMessage(message)
+            sendOverWire(message)
         }
     }
 
@@ -122,20 +158,20 @@ final class ChatViewModel: ObservableObject {
         print("[Chat] Flushing \(queued.count) queued message(s)")
 
         for message in queued {
-            sendSingleMessage(message)
+            sendOverWire(message)
         }
     }
 
-    /// Encode and send a single message over MPC.
-    private func sendSingleMessage(_ message: Message) {
+    /// Encode and send a single message over MPC, then mark as sent.
+    private func sendOverWire(_ message: Message) {
         let payload = MessagePayload(from: message)
 
         do {
             let data = try encoder.encode(payload)
             try connectivity.sendToAll(data)
 
-            // Mark as sent
-            messages = store.updateStatus(id: message.id, to: .sent)
+            // Mark as sent in-memory
+            updateMessageStatus(id: message.id, to: .sent)
             print("[Chat] Sent: \(message.text)")
         } catch {
             print("[Chat] Send failed: \(error.localizedDescription)")
@@ -150,12 +186,7 @@ final class ChatViewModel: ObservableObject {
             let payload = try decoder.decode(MessagePayload.self, from: data)
             let message = payload.toMessage()
 
-            // Dedup: appendMessage checks by id
-            let updated = store.appendMessage(message)
-
-            // Only update UI if message was actually new
-            if updated.count != messages.count {
-                messages = updated
+            if insertMessage(message) {
                 print("[Chat] Received: \(message.text) from \(message.senderName)")
             }
         } catch {

@@ -13,7 +13,7 @@ struct ContentView: View {
     @EnvironmentObject var viewModel: ChatViewModel
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             VStack(spacing: 0) {
                 // Message list
                 messageList
@@ -26,11 +26,12 @@ struct ContentView: View {
             .navigationTitle("BLE Chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     ConnectionBadge(state: viewModel.connectionState)
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
 
     // MARK: - Message List
@@ -41,13 +42,13 @@ struct ContentView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 48))
-                        .foregroundStyle(.secondary)
+                        .foregroundColor(.secondary)
                     Text("No Messages")
                         .font(.title2)
                         .fontWeight(.semibold)
                     Text("Type a message below.\nIt will be delivered when a peer comes nearby.")
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -55,8 +56,7 @@ struct ContentView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 10) {
-                            // Messages sorted oldest → newest for natural reading
-                            ForEach(viewModel.messages.reversed()) { message in
+                            ForEach(viewModel.messages) { message in
                                 MessageBubble(message: message)
                                     .id(message.id)
                             }
@@ -64,14 +64,23 @@ struct ContentView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                     }
-                    .onChange(of: viewModel.messages.count) { _ in
-                        // Scroll to latest message
-                        if let last = viewModel.messages.first {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
+                    .onAppear {
+                        // Scroll to bottom on first appear
+                        scrollToBottom(proxy: proxy)
                     }
+                    .onChange(of: viewModel.messages.count) { _ in
+                        scrollToBottom(proxy: proxy)
+                    }
+                }
+            }
+        }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        if let last = viewModel.messages.last {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
         }
@@ -81,26 +90,22 @@ struct ContentView: View {
 
     private var composeBar: some View {
         HStack(spacing: 10) {
-            TextField("Type a message…", text: $viewModel.composeText, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...4)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color(.systemGray6))
-                .clipShape(RoundedRectangle(cornerRadius: 20))
+            TextField("Type a message…", text: $viewModel.composeText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.vertical, 4)
 
             Button {
                 viewModel.sendMessage()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 32))
-                    .foregroundStyle(.blue)
+                    .foregroundColor(.blue)
             }
             .disabled(viewModel.composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(Color(.systemBackground))
     }
 }
 
@@ -119,13 +124,13 @@ struct MessageBubble: View {
                     Text(message.senderName)
                         .font(.caption2)
                         .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
+                        .foregroundColor(.secondary)
                 }
 
                 // Message text
                 Text(message.text)
                     .font(.body)
-                    .foregroundStyle(message.isMine ? .white : .primary)
+                    .foregroundColor(message.isMine ? .white : .primary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .background(
@@ -139,7 +144,7 @@ struct MessageBubble: View {
                 HStack(spacing: 4) {
                     Text(message.timestamp, style: .time)
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundColor(.gray)
 
                     if message.isMine {
                         statusIcon
@@ -155,20 +160,17 @@ struct MessageBubble: View {
     private var statusIcon: some View {
         switch message.status {
         case .queued:
-            Label("Queued", systemImage: "clock")
+            Image(systemName: "clock")
                 .font(.caption2)
-                .foregroundStyle(.orange)
-                .labelStyle(.iconOnly)
+                .foregroundColor(.orange)
         case .sent:
-            Label("Sent", systemImage: "checkmark")
+            Image(systemName: "checkmark")
                 .font(.caption2)
-                .foregroundStyle(.green)
-                .labelStyle(.iconOnly)
+                .foregroundColor(.green)
         case .delivered:
-            Label("Delivered", systemImage: "checkmark.circle.fill")
+            Image(systemName: "checkmark.circle.fill")
                 .font(.caption2)
-                .foregroundStyle(.green)
-                .labelStyle(.iconOnly)
+                .foregroundColor(.green)
         case .received:
             EmptyView()
         }
@@ -188,11 +190,12 @@ struct ConnectionBadge: View {
 
             Text(state.displayText)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundColor(.secondary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: Capsule())
+        .background(Color(.systemGray6))
+        .clipShape(Capsule())
     }
 
     private var dotColor: Color {
