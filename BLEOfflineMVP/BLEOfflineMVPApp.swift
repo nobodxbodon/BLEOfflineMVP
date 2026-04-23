@@ -9,9 +9,12 @@ import SwiftUI
 
 @main
 struct BLEOfflineMVPApp: App {
+    @StateObject private var viewModel = ChatViewModel()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(viewModel)
         }
     }
 }
