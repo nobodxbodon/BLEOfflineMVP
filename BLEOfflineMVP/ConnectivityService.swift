@@ -2,44 +2,63 @@
 //  ConnectivityService.swift
 //  BLEOfflineMVP
 //
-//  Adapted from CoreDataSync/MPCService.swift
-//  Simplified for text-only messaging MVP.
+//  Core Bluetooth implementation — works with Bluetooth only, NO Wi-Fi needed.
+//  Each device runs both CBCentralManager (scanner) and CBPeripheralManager (advertiser).
+//
+//  Sending:   Our central writes to connected peripheral's characteristic.
+//  Receiving: Our peripheral manager fires didReceiveWrite when another central writes.
 //
 //  Created by MD Aminuzzaman on 4/23/26.
 //
 
 import Foundation
-import MultipeerConnectivity
+import CoreBluetooth
 import Combine
+import UIKit
 
-// MARK: - Connectivity Service
+// MARK: - Connectivity Service (Core Bluetooth)
 
-/// Manages MultipeerConnectivity for peer-to-peer text messaging.
-/// Both advertises and browses simultaneously so any two devices
-/// running this app will auto-discover and auto-connect.
 @MainActor
 final class ConnectivityService: NSObject, ObservableObject {
 
-    // MARK: - Published State
+    // MARK: - Published State (same interface as MPC version)
 
-    @Published private(set) var connectedPeers: [MCPeerID] = []
+    @Published private(set) var connectedPeers: [String] = []
     @Published private(set) var connectionState: ConnectionState = .idle
 
     // MARK: - Data Publisher
 
-    /// Emits raw Data received from any connected peer.
-    let dataReceived = PassthroughSubject<(Data, MCPeerID), Never>()
+    let dataReceived = PassthroughSubject<(Data, String), Never>()
 
-    // MARK: - Configuration
+    // MARK: - BLE UUIDs
 
-    private static let serviceType = "blemvp"   // max 15 chars, lowercase
+    private static let serviceUUID = CBUUID(string: "A1B2C3D4-E5F6-7890-ABCD-EF1234567890")
+    private static let writeUUID  = CBUUID(string: "A1B2C3D4-E5F6-7890-ABCD-EF1234567891")
 
-    private let peerID: MCPeerID
-    private var session: MCSession!
-    private var advertiser: MCNearbyServiceAdvertiser!
-    private var browser: MCNearbyServiceBrowser!
-    private var isAdvertising = false
-    private var isBrowsing = false
+    // MARK: - BLE Managers
+
+    private var centralManager: CBCentralManager!
+    private var peripheralManager: CBPeripheralManager!
+
+    // MARK: - State
+
+    private var isRunning = false
+    private var centralReady = false
+    private var peripheralReady = false
+    private var serviceAdded = false
+
+    /// Peripherals we've connected to and discovered the write characteristic on.
+    private var writeTargets: [CBPeripheral: CBCharacteristic] = [:]
+
+    /// Peripherals we're currently connecting to (keep strong reference).
+    private var pendingPeripherals: Set<CBPeripheral> = []
+
+    /// Reassembly buffers for chunked messages (keyed by central identifier).
+    private var receiveBuffers: [UUID: Data] = [:]
+    private var expectedLengths: [UUID: Int] = [:]
+
+    /// The characteristic we expose on our peripheral for others to write to.
+    private var messageCharacteristic: CBMutableCharacteristic!
 
     // MARK: - Connection State
 
@@ -74,192 +93,324 @@ final class ConnectivityService: NSObject, ObservableObject {
     // MARK: - Init
 
     override init() {
-        self.peerID = MCPeerID(displayName: UIDevice.current.name)
         super.init()
-        setupSession()
-        setupAdvertiser()
-        setupBrowser()
-    }
-
-    // MARK: - Setup
-
-    private func setupSession() {
-        session = MCSession(
-            peer: peerID,
-            securityIdentity: nil,
-            encryptionPreference: .none    // No encryption per MVP requirement
-        )
-        session.delegate = self
-    }
-
-    private func setupAdvertiser() {
-        advertiser = MCNearbyServiceAdvertiser(
-            peer: peerID,
-            discoveryInfo: nil,
-            serviceType: Self.serviceType
-        )
-        advertiser.delegate = self
-    }
-
-    private func setupBrowser() {
-        browser = MCNearbyServiceBrowser(
-            peer: peerID,
-            serviceType: Self.serviceType
-        )
-        browser.delegate = self
+        centralManager = CBCentralManager(delegate: self, queue: .main)
+        peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
     }
 
     // MARK: - Public Controls
 
-    /// Start advertising and browsing for peers.
     func start() {
-        guard !isAdvertising, !isBrowsing else { return }
-        advertiser.startAdvertisingPeer()
-        browser.startBrowsingForPeers()
-        isAdvertising = true
-        isBrowsing = true
-        connectionState = .searching
-        print("[MPC] Started advertising + browsing")
+        isRunning = true
+        startIfReady()
     }
 
-    /// Stop all MPC operations.
     func stop() {
-        advertiser.stopAdvertisingPeer()
-        browser.stopBrowsingForPeers()
-        session.disconnect()
-        isAdvertising = false
-        isBrowsing = false
+        isRunning = false
+        centralManager.stopScan()
+        peripheralManager.stopAdvertising()
+        for peripheral in writeTargets.keys {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+        writeTargets.removeAll()
+        pendingPeripherals.removeAll()
         connectedPeers = []
         connectionState = .idle
-        print("[MPC] Stopped")
+    }
+
+    // MARK: - Internal Start
+
+    private func startIfReady() {
+        guard isRunning else { return }
+
+        if centralReady {
+            centralManager.scanForPeripherals(
+                withServices: [Self.serviceUUID],
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+            )
+            if connectedPeers.isEmpty {
+                connectionState = .searching
+            }
+            print("[BLE] Central scanning")
+        }
+
+        if peripheralReady && !serviceAdded {
+            setupGATTService()
+        }
+    }
+
+    // MARK: - GATT Service Setup
+
+    private func setupGATTService() {
+        let characteristic = CBMutableCharacteristic(
+            type: Self.writeUUID,
+            properties: [.write, .writeWithoutResponse],
+            value: nil,
+            permissions: [.writeable]
+        )
+        messageCharacteristic = characteristic
+
+        let service = CBMutableService(type: Self.serviceUUID, primary: true)
+        service.characteristics = [characteristic]
+        peripheralManager.add(service)
     }
 
     // MARK: - Send Data
 
-    /// Send data to all connected peers with reliable delivery.
     func sendToAll(_ data: Data) throws {
-        guard !connectedPeers.isEmpty else {
+        guard !writeTargets.isEmpty else {
             throw ConnectivityError.noPeersConnected
         }
-        try session.send(data, toPeers: connectedPeers, with: .reliable)
+
+        // Prepend 4-byte length header for reassembly
+        var length = UInt32(data.count).bigEndian
+        let framedData = Data(bytes: &length, count: 4) + data
+
+        for (peripheral, characteristic) in writeTargets {
+            let maxLen = peripheral.maximumWriteValueLength(for: .withResponse)
+            if maxLen > 0 && framedData.count > maxLen {
+                // Chunk it
+                var offset = 0
+                while offset < framedData.count {
+                    let end = min(offset + maxLen, framedData.count)
+                    let chunk = framedData[offset..<end]
+                    peripheral.writeValue(Data(chunk), for: characteristic, type: .withResponse)
+                    offset = end
+                }
+            } else {
+                peripheral.writeValue(framedData, for: characteristic, type: .withResponse)
+            }
+        }
     }
 
     enum ConnectivityError: LocalizedError {
         case noPeersConnected
-
-        var errorDescription: String? {
-            switch self {
-            case .noPeersConnected: return "No peers connected"
-            }
-        }
+        var errorDescription: String? { "No peers connected" }
     }
 
     // MARK: - Helpers
 
-    /// The display name of this device (used as sender name).
-    var displayName: String { peerID.displayName }
-}
+    var displayName: String { UIDevice.current.name }
 
-// MARK: - MCSessionDelegate
-
-extension ConnectivityService: MCSessionDelegate {
-
-    nonisolated func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        Task { @MainActor in
-            handleStateChange(peer: peerID, state: state)
-        }
-    }
-
-    @MainActor
-    private func handleStateChange(peer: MCPeerID, state: MCSessionState) {
-        switch state {
-        case .notConnected:
-            connectedPeers.removeAll { $0 == peer }
-            print("[MPC] Peer disconnected: \(peer.displayName)")
-
-        case .connecting:
-            connectionState = .connecting
-            print("[MPC] Connecting to: \(peer.displayName)")
-
-        case .connected:
-            if !connectedPeers.contains(peer) {
-                connectedPeers.append(peer)
-            }
-            print("[MPC] Connected to: \(peer.displayName)")
-
-        @unknown default:
-            break
-        }
-
-        // Update aggregate state
+    private func updatePeerList() {
+        connectedPeers = writeTargets.keys.map { $0.identifier.uuidString }
         if connectedPeers.isEmpty {
-            connectionState = (isAdvertising || isBrowsing) ? .searching : .idle
+            connectionState = pendingPeripherals.isEmpty
+                ? (isRunning ? .searching : .idle)
+                : .connecting
         } else {
             connectionState = .connected(peerCount: connectedPeers.count)
         }
     }
-
-    nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        Task { @MainActor in
-            dataReceived.send((data, peerID))
-        }
-    }
-
-    // Unused but required delegate stubs
-    nonisolated func session(_ s: MCSession, didReceive stream: InputStream, withName name: String, fromPeer p: MCPeerID) {}
-    nonisolated func session(_ s: MCSession, didStartReceivingResourceWithName n: String, fromPeer p: MCPeerID, with progress: Progress) {}
-    nonisolated func session(_ s: MCSession, didFinishReceivingResourceWithName n: String, fromPeer p: MCPeerID, at url: URL?, withError e: Error?) {}
 }
 
-// MARK: - MCNearbyServiceAdvertiserDelegate
+// MARK: - CBCentralManagerDelegate
 
-extension ConnectivityService: MCNearbyServiceAdvertiserDelegate {
+extension ConnectivityService: CBCentralManagerDelegate {
 
-    nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser,
-                                didReceiveInvitationFromPeer peerID: MCPeerID,
-                                withContext context: Data?,
-                                invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        // Auto-accept all invitations — zero user friction
+    nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
         Task { @MainActor in
-            invitationHandler(true, session)
-            print("[MPC] Auto-accepted invitation from: \(peerID.displayName)")
+            switch central.state {
+            case .poweredOn:
+                self.centralReady = true
+                print("[BLE] Central powered on")
+                self.startIfReady()
+            case .poweredOff:
+                self.centralReady = false
+                self.connectionState = .error("Bluetooth off")
+            default:
+                self.centralReady = false
+            }
         }
     }
 
-    nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+    nonisolated func centralManager(_ central: CBCentralManager,
+                                     didDiscover peripheral: CBPeripheral,
+                                     advertisementData: [String: Any],
+                                     rssi RSSI: NSNumber) {
         Task { @MainActor in
-            connectionState = .error("Advertising failed")
-            isAdvertising = false
-            print("[MPC] Advertising error: \(error.localizedDescription)")
+            // Skip if already connected or connecting
+            guard self.writeTargets[peripheral] == nil,
+                  !self.pendingPeripherals.contains(peripheral) else { return }
+
+            let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "Unknown"
+            print("[BLE] Discovered: \(name)")
+
+            self.pendingPeripherals.insert(peripheral)
+            self.connectionState = .connecting
+            central.connect(peripheral, options: nil)
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        Task { @MainActor in
+            print("[BLE] Connected to peripheral: \(peripheral.name ?? peripheral.identifier.uuidString)")
+            peripheral.delegate = self
+            peripheral.discoverServices([Self.serviceUUID])
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager,
+                                     didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        Task { @MainActor in
+            print("[BLE] Failed to connect: \(error?.localizedDescription ?? "unknown")")
+            self.pendingPeripherals.remove(peripheral)
+            self.updatePeerList()
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager,
+                                     didDisconnectPeripheral peripheral: CBPeripheral,
+                                     error: Error?) {
+        Task { @MainActor in
+            print("[BLE] Disconnected from: \(peripheral.name ?? peripheral.identifier.uuidString)")
+            self.writeTargets.removeValue(forKey: peripheral)
+            self.pendingPeripherals.remove(peripheral)
+            self.updatePeerList()
+
+            // Auto-reconnect
+            if self.isRunning {
+                print("[BLE] Auto-reconnecting...")
+                central.connect(peripheral, options: nil)
+                self.pendingPeripherals.insert(peripheral)
+            }
         }
     }
 }
 
-// MARK: - MCNearbyServiceBrowserDelegate
+// MARK: - CBPeripheralDelegate (for discovering characteristics on remote peripherals)
 
-extension ConnectivityService: MCNearbyServiceBrowserDelegate {
+extension ConnectivityService: CBPeripheralDelegate {
 
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Task { @MainActor in
-            guard peerID != self.peerID else { return }
-            print("[MPC] Discovered peer: \(peerID.displayName)")
-
-            // Auto-invite discovered peer
-            browser.invitePeer(peerID, to: session, withContext: nil, timeout: 30)
+            guard error == nil,
+                  let service = peripheral.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
+                print("[BLE] Service discovery failed: \(error?.localizedDescription ?? "not found")")
+                return
+            }
+            peripheral.discoverCharacteristics([Self.writeUUID], for: service)
         }
     }
 
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                 didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         Task { @MainActor in
-            print("[MPC] Lost peer: \(peerID.displayName)")
+            guard error == nil,
+                  let characteristic = service.characteristics?.first(where: { $0.uuid == Self.writeUUID }) else {
+                print("[BLE] Characteristic discovery failed")
+                return
+            }
+
+            self.writeTargets[peripheral] = characteristic
+            self.pendingPeripherals.remove(peripheral)
+            self.updatePeerList()
+            print("[BLE] Ready to send to: \(peripheral.name ?? peripheral.identifier.uuidString)")
         }
     }
 
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                 didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            Task { @MainActor in
+                print("[BLE] Write error: \(error.localizedDescription)")
+            }
+        }
+    }
+}
+
+// MARK: - CBPeripheralManagerDelegate (receives data from other centrals)
+
+extension ConnectivityService: CBPeripheralManagerDelegate {
+
+    nonisolated func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         Task { @MainActor in
-            connectionState = .error("Browsing failed")
-            isBrowsing = false
-            print("[MPC] Browsing error: \(error.localizedDescription)")
+            switch peripheral.state {
+            case .poweredOn:
+                self.peripheralReady = true
+                print("[BLE] Peripheral powered on")
+                self.startIfReady()
+            case .poweredOff:
+                self.peripheralReady = false
+            default:
+                self.peripheralReady = false
+            }
+        }
+    }
+
+    nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        Task { @MainActor in
+            if let error = error {
+                print("[BLE] Failed to add service: \(error.localizedDescription)")
+                return
+            }
+            self.serviceAdded = true
+            peripheral.startAdvertising([
+                CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID],
+                CBAdvertisementDataLocalNameKey: UIDevice.current.name
+            ])
+            print("[BLE] Service added, advertising started")
+        }
+    }
+
+    nonisolated func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        Task { @MainActor in
+            if let error = error {
+                print("[BLE] Advertising failed: \(error.localizedDescription)")
+            } else {
+                print("[BLE] Advertising successfully")
+            }
+        }
+    }
+
+    nonisolated func peripheralManager(_ peripheral: CBPeripheralManager,
+                                        didReceiveWrite requests: [CBATTRequest]) {
+        Task { @MainActor in
+            for request in requests {
+                guard let data = request.value, !data.isEmpty else {
+                    peripheral.respond(to: request, withResult: .success)
+                    continue
+                }
+
+                let centralID = request.central.identifier
+                self.processReceivedChunk(data, from: centralID)
+                peripheral.respond(to: request, withResult: .success)
+            }
+        }
+    }
+
+    // MARK: - Chunk Reassembly
+
+    @MainActor
+    private func processReceivedChunk(_ data: Data, from centralID: UUID) {
+        if receiveBuffers[centralID] == nil {
+            // New message — first 4 bytes are the total length
+            guard data.count >= 4 else { return }
+            let totalLength = Int(data.prefix(4).withUnsafeBytes {
+                $0.load(as: UInt32.self).bigEndian
+            })
+            let payload = data.dropFirst(4)
+            expectedLengths[centralID] = totalLength
+
+            if payload.count >= totalLength {
+                // Complete in one write
+                dataReceived.send((Data(payload.prefix(totalLength)), centralID.uuidString))
+                receiveBuffers.removeValue(forKey: centralID)
+                expectedLengths.removeValue(forKey: centralID)
+            } else {
+                receiveBuffers[centralID] = Data(payload)
+            }
+        } else {
+            // Continuation chunk
+            receiveBuffers[centralID]?.append(data)
+
+            if let buffer = receiveBuffers[centralID],
+               let expected = expectedLengths[centralID],
+               buffer.count >= expected {
+                dataReceived.send((Data(buffer.prefix(expected)), centralID.uuidString))
+                receiveBuffers.removeValue(forKey: centralID)
+                expectedLengths.removeValue(forKey: centralID)
+            }
         }
     }
 }
