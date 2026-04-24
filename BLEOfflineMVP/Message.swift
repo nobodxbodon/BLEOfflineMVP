@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Message Model
 
-/// Represents a text message exchanged between devices via MPC.
+/// Represents a text message exchanged between devices via BLE.
 /// Each message has a unique UUID for deduplication across devices.
 struct Message: Identifiable, Codable, Equatable {
     let id: UUID
@@ -47,7 +47,7 @@ struct Message: Identifiable, Codable, Equatable {
 
 // MARK: - Wire Format
 
-/// Lightweight payload sent over MPC — excludes local-only fields like `isMine` and `status`.
+/// Lightweight payload sent over BLE — excludes local-only fields like `isMine` and `status`.
 struct MessagePayload: Codable {
     let id: UUID
     let text: String

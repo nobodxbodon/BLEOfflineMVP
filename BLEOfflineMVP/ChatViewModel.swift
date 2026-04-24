@@ -161,19 +161,24 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Encode and send a single message over MPC, then mark as sent.
+    /// Encode and send a single message over BLE, then mark as sent.
     private func sendOverWire(_ message: Message) {
         let payload = MessagePayload(from: message)
 
-        do {
-            let data = try encoder.encode(payload)
-            try connectivity.sendToAll(data)
+        Task {
+            do {
+                let data = try encoder.encode(payload)
+                try await connectivity.sendToAll(data)
 
-            // Mark as sent in-memory
-            updateMessageStatus(id: message.id, to: .sent)
-            print("[Chat] Sent: \(message.text)")
-        } catch {
-            print("[Chat] Send failed: \(error.localizedDescription)")
+                // Mark as sent in-memory
+                await MainActor.run {
+                    self.updateMessageStatus(id: message.id, to: .sent)
+                }
+                print("[Chat] Sent: \(message.text)")
+            } catch {
+                // Keep queued; it will be retried on next connect / flush.
+                print("[Chat] Send failed: \(error.localizedDescription)")
+            }
         }
     }
 

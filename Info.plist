@@ -4,12 +4,5 @@
 <dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>BLEOfflineMVP uses Bluetooth to discover and exchange messages with nearby devices without Wi-Fi or internet.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>BLEOfflineMVP uses local networking to discover and exchange messages with nearby devices without internet.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_blemvp._tcp</string>
-		<string>_blemvp._udp</string>
-	</array>
 </dict>
 </plist>

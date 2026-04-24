@@ -21,7 +21,7 @@ import UIKit
 @MainActor
 final class ConnectivityService: NSObject, ObservableObject {
 
-    // MARK: - Published State (same interface as MPC version)
+    // MARK: - Published State (kept stable from earlier prototype)
 
     @Published private(set) var connectedPeers: [String] = []
     @Published private(set) var connectionState: ConnectionState = .idle
@@ -52,6 +52,9 @@ final class ConnectivityService: NSObject, ObservableObject {
 
     /// Peripherals we're currently connecting to (keep strong reference).
     private var pendingPeripherals: Set<CBPeripheral> = []
+
+    /// One outstanding write at a time per peripheral (CoreBluetooth callback-driven).
+    private var pendingWriteContinuations: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     /// Reassembly buffers for chunked messages (keyed by central identifier).
     private var receiveBuffers: [UUID: Data] = [:]
@@ -157,7 +160,9 @@ final class ConnectivityService: NSObject, ObservableObject {
 
     // MARK: - Send Data
 
-    func sendToAll(_ data: Data) throws {
+    func sendToAll(_ data: Data) async throws {
+        pruneDisconnectedWriteTargets()
+
         guard !writeTargets.isEmpty else {
             throw ConnectivityError.noPeersConnected
         }
@@ -166,26 +171,37 @@ final class ConnectivityService: NSObject, ObservableObject {
         var length = UInt32(data.count).bigEndian
         let framedData = Data(bytes: &length, count: 4) + data
 
-        for (peripheral, characteristic) in writeTargets {
-            let maxLen = peripheral.maximumWriteValueLength(for: .withResponse)
-            if maxLen > 0 && framedData.count > maxLen {
-                // Chunk it
+        // Snapshot to avoid mutating while iterating
+        let targets = Array(writeTargets)
+        for (peripheral, characteristic) in targets {
+            guard peripheral.state == .connected else { continue }
+
+            let maxLen = max(20, peripheral.maximumWriteValueLength(for: .withResponse))
+            if framedData.count > maxLen {
                 var offset = 0
                 while offset < framedData.count {
                     let end = min(offset + maxLen, framedData.count)
-                    let chunk = framedData[offset..<end]
-                    peripheral.writeValue(Data(chunk), for: characteristic, type: .withResponse)
+                    let chunk = Data(framedData[offset..<end])
+                    try await writeChunk(chunk, to: peripheral, characteristic: characteristic)
                     offset = end
                 }
             } else {
-                peripheral.writeValue(framedData, for: characteristic, type: .withResponse)
+                try await writeChunk(framedData, to: peripheral, characteristic: characteristic)
             }
         }
     }
 
     enum ConnectivityError: LocalizedError {
         case noPeersConnected
-        var errorDescription: String? { "No peers connected" }
+        case writeTimeout
+        var errorDescription: String? {
+            switch self {
+            case .noPeersConnected:
+                return "No peers connected"
+            case .writeTimeout:
+                return "Write timed out"
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -200,6 +216,37 @@ final class ConnectivityService: NSObject, ObservableObject {
                 : .connecting
         } else {
             connectionState = .connected(peerCount: connectedPeers.count)
+        }
+    }
+
+    private func pruneDisconnectedWriteTargets() {
+        var removed = false
+        for peripheral in writeTargets.keys where peripheral.state != .connected {
+            writeTargets.removeValue(forKey: peripheral)
+            pendingPeripherals.remove(peripheral)
+            removed = true
+        }
+        if removed {
+            updatePeerList()
+        }
+    }
+
+    private func writeChunk(_ data: Data, to peripheral: CBPeripheral, characteristic: CBCharacteristic) async throws {
+        // If the remote side rebooted, CoreBluetooth can leave us with a "connected" object that won't ACK writes.
+        // We treat a missing callback as failure and let the scan/rediscover path heal the connection.
+        let token = UUID()
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            pendingWriteContinuations[token] = continuation
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+
+            Task { @MainActor in
+                // Timeout: if we don't get didWriteValueFor, consider it failed.
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if let cont = self.pendingWriteContinuations.removeValue(forKey: token) {
+                    cont.resume(throwing: ConnectivityError.writeTimeout)
+                }
+            }
         }
     }
 }
@@ -268,11 +315,16 @@ extension ConnectivityService: CBCentralManagerDelegate {
             self.pendingPeripherals.remove(peripheral)
             self.updatePeerList()
 
-            // Auto-reconnect
-            if self.isRunning {
-                print("[BLE] Auto-reconnecting...")
-                central.connect(peripheral, options: nil)
-                self.pendingPeripherals.insert(peripheral)
+            // Heal by going back to scanning. Auto-connecting to a stale CBPeripheral after the
+            // remote app restarts can wedge sending while UI still looks "connected".
+            if self.isRunning && self.centralReady {
+                self.centralManager.scanForPeripherals(
+                    withServices: [Self.serviceUUID],
+                    options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+                )
+                if self.connectedPeers.isEmpty {
+                    self.connectionState = .searching
+                }
             }
         }
     }
@@ -311,9 +363,21 @@ extension ConnectivityService: CBPeripheralDelegate {
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                  didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        if let error = error {
-            Task { @MainActor in
+        Task { @MainActor in
+            // Resume the oldest pending write continuation.
+            // We only allow one outstanding write per peripheral in `sendToAll`, so order is fine.
+            if let token = self.pendingWriteContinuations.keys.first {
+                let cont = self.pendingWriteContinuations.removeValue(forKey: token)
+                if let error = error {
+                    cont?.resume(throwing: error)
+                } else {
+                    cont?.resume()
+                }
+            }
+
+            if let error = error {
                 print("[BLE] Write error: \(error.localizedDescription)")
+                self.pruneDisconnectedWriteTargets()
             }
         }
     }
