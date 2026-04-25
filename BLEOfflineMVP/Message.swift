@@ -72,3 +72,34 @@ struct MessagePayload: Codable {
         )
     }
 }
+
+enum WirePacket: Codable {
+    case message(MessagePayload)
+    case ack(UUID)
+
+    private enum Kind: String, Codable { case message, ack }
+    private enum CodingKeys: String, CodingKey { case kind, message, ackID }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(Kind.self, forKey: .kind)
+        switch kind {
+        case .message:
+            self = .message(try c.decode(MessagePayload.self, forKey: .message))
+        case .ack:
+            self = .ack(try c.decode(UUID.self, forKey: .ackID))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .message(let payload):
+            try c.encode(Kind.message, forKey: .kind)
+            try c.encode(payload, forKey: .message)
+        case .ack(let id):
+            try c.encode(Kind.ack, forKey: .kind)
+            try c.encode(id, forKey: .ackID)
+        }
+    }
+}

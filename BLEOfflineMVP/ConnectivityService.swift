@@ -201,28 +201,32 @@ final class ConnectivityService: NSObject, ObservableObject {
         var length = UInt32(data.count).bigEndian
         let framedData = Data(bytes: &length, count: 4) + data
 
-        // Snapshot to avoid mutating while iterating
-        let targets = Array(writeTargets)
-        for (peripheral, characteristic) in targets {
-            guard peripheral.state == .connected else { continue }
+        // IMPORTANT: send via ONE path only to avoid duplicates + ACK storms.
+        // Prefer central->peripheral writes when we have connected write targets.
+        let writePeripherals = Array(writeTargets.keys).filter { $0.state == .connected }
+        if !writePeripherals.isEmpty {
+            // Snapshot to avoid mutating while iterating
+            let targets = Array(writeTargets)
+            for (peripheral, characteristic) in targets {
+                guard peripheral.state == .connected else { continue }
 
-            let maxLen = max(20, peripheral.maximumWriteValueLength(for: .withResponse))
-            if framedData.count > maxLen {
-                var offset = 0
-                while offset < framedData.count {
-                    let end = min(offset + maxLen, framedData.count)
-                    let chunk = Data(framedData[offset..<end])
-                    try await writeChunk(chunk, to: peripheral, characteristic: characteristic)
-                    offset = end
+                let maxLen = max(20, peripheral.maximumWriteValueLength(for: .withResponse))
+                if framedData.count > maxLen {
+                    var offset = 0
+                    while offset < framedData.count {
+                        let end = min(offset + maxLen, framedData.count)
+                        let chunk = Data(framedData[offset..<end])
+                        try await writeChunk(chunk, to: peripheral, characteristic: characteristic)
+                        offset = end
+                    }
+                } else {
+                    try await writeChunk(framedData, to: peripheral, characteristic: characteristic)
                 }
-            } else {
-                try await writeChunk(framedData, to: peripheral, characteristic: characteristic)
             }
+        } else {
+            // Otherwise, send via peripheral->central notifications (when peer connected to us).
+            sendNotifyFramed(framedData)
         }
-
-        // If the remote device only connected to us as a central (and we didn't connect back),
-        // notifications enable bidirectional messaging over that single link.
-        sendNotifyFramed(framedData)
     }
 
     enum ConnectivityError: LocalizedError {
@@ -402,12 +406,22 @@ extension ConnectivityService: CBCentralManagerDelegate {
                                      advertisementData: [String: Any],
                                      rssi RSSI: NSNumber) {
         Task { @MainActor in
+            // Keep internal state clean; stale CBPeripheral instances can linger across app restarts.
+            self.pruneDisconnectedWriteTargets()
+
             // Skip if already connected or connecting
             guard self.writeTargets[peripheral] == nil,
                   !self.pendingPeripherals.contains(peripheral) else { return }
 
             let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "Unknown"
             print("[BLE] Discovered: \(name)")
+
+            // If we previously tracked a different CBPeripheral object with the same identifier,
+            // drop it and prefer the newly discovered instance.
+            if let stale = self.writeTargets.keys.first(where: { $0.identifier == peripheral.identifier && $0 !== peripheral }) {
+                self.writeTargets.removeValue(forKey: stale)
+                self.pendingPeripherals.remove(stale)
+            }
 
             self.pendingPeripherals.insert(peripheral)
             self.connectionState = .connecting
@@ -472,6 +486,16 @@ extension ConnectivityService: CBPeripheralDelegate {
         }
     }
 
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        // When the remote app restarts, iOS can invalidate cached services.
+        // If we don't re-discover, we may fail to re-subscribe to notify → one-way messaging.
+        Task { @MainActor in
+            guard self.isRunning else { return }
+            print("[BLE] Services modified for \(peripheral.identifier.uuidString) → re-discovering")
+            peripheral.discoverServices([Self.serviceUUID])
+        }
+    }
+
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                  didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         Task { @MainActor in
@@ -492,6 +516,8 @@ extension ConnectivityService: CBPeripheralDelegate {
 
             if let notifyCharacteristic = characteristics.first(where: { $0.uuid == Self.notifyUUID }) {
                 peripheral.setNotifyValue(true, for: notifyCharacteristic)
+            } else {
+                print("[BLE] Notify characteristic missing (will retry on service refresh)")
             }
         }
     }

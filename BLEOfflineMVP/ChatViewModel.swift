@@ -34,6 +34,9 @@ final class ChatViewModel: ObservableObject {
     /// Set of message IDs we already have, for O(1) dedup.
     private var knownMessageIDs: Set<UUID> = []
 
+    /// Ack tracking for resend.
+    private var ackWaitTasks: [UUID: Task<Void, Never>] = [:]
+
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
@@ -151,6 +154,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Send all queued messages to connected peers.
     private func flushOutbox() {
+        // Only flush truly queued. "sent" will be handled by ACK retry loop.
         let queued = messages.filter { $0.isMine && $0.status == .queued }
         guard !queued.isEmpty else { return }
 
@@ -163,11 +167,11 @@ final class ChatViewModel: ObservableObject {
 
     /// Encode and send a single message over BLE, then mark as sent.
     private func sendOverWire(_ message: Message) {
-        let payload = MessagePayload(from: message)
+        let packet = WirePacket.message(MessagePayload(from: message))
 
         Task {
             do {
-                let data = try encoder.encode(payload)
+                let data = try encoder.encode(packet)
                 try await connectivity.sendToAll(data)
 
                 // Mark as sent in-memory
@@ -175,6 +179,8 @@ final class ChatViewModel: ObservableObject {
                     self.updateMessageStatus(id: message.id, to: .sent)
                 }
                 print("[Chat] Sent: \(message.text)")
+
+                ensureAckWaitTask(for: message.id)
             } catch {
                 // Keep queued; it will be retried on next connect / flush.
                 print("[Chat] Send failed: \(error.localizedDescription)")
@@ -187,14 +193,62 @@ final class ChatViewModel: ObservableObject {
     /// Decode incoming data and add to inbox.
     private func handleReceivedData(_ data: Data) {
         do {
-            let payload = try decoder.decode(MessagePayload.self, from: data)
-            let message = payload.toMessage()
+            let packet = try decoder.decode(WirePacket.self, from: data)
+            switch packet {
+            case .message(let payload):
+                let message = payload.toMessage()
+                if insertMessage(message) {
+                    print("[Chat] Received: \(message.text) from \(message.senderName)")
+                }
+                sendAck(for: payload.id)
 
-            if insertMessage(message) {
-                print("[Chat] Received: \(message.text) from \(message.senderName)")
+            case .ack(let id):
+                ackWaitTasks[id]?.cancel()
+                ackWaitTasks[id] = nil
+                updateMessageStatus(id: id, to: .delivered)
             }
         } catch {
             print("[Chat] Failed to decode received data: \(error.localizedDescription)")
+        }
+    }
+
+    private func sendAck(for messageID: UUID) {
+        let packet = WirePacket.ack(messageID)
+        Task {
+            do {
+                let data = try encoder.encode(packet)
+                try await connectivity.sendToAll(data)
+            } catch {
+                // Best-effort; sender will retry if ack not received.
+            }
+        }
+    }
+
+    private func ensureAckWaitTask(for messageID: UUID) {
+        // Don’t create multiple retry loops for the same message.
+        if ackWaitTasks[messageID] != nil { return }
+
+        ackWaitTasks[messageID] = Task { [weak self] in
+            guard let self else { return }
+
+            // Retry a few times if we don't see an ACK (receiver dedups by UUID).
+            for _ in 0..<3 {
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+
+                if Task.isCancelled { return }
+                guard let msg = self.messages.first(where: { $0.id == messageID }) else { return }
+                if msg.status == .delivered { return }
+
+                guard self.connectedPeerCount > 0 else { continue }
+
+                do {
+                    let packet = WirePacket.message(MessagePayload(from: msg))
+                    let data = try self.encoder.encode(packet)
+                    try await self.connectivity.sendToAll(data)
+                } catch {
+                    // Keep waiting/retrying.
+                }
+            }
         }
     }
 }
