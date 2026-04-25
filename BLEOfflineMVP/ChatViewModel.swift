@@ -84,6 +84,7 @@ final class ChatViewModel: ObservableObject {
             .sink { [weak self] peers in
                 if !peers.isEmpty {
                     self?.flushOutbox()
+                    self?.resumePendingDeliveries()
                 }
             }
             .store(in: &cancellables)
@@ -165,6 +166,21 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func resumePendingDeliveries() {
+        // If we reconnected after a while, previously "sent" (but un-ACK'd) messages
+        // must re-enter the retry loop; otherwise they can remain stuck at a green check.
+        let pending = messages.filter { $0.isMine && ($0.status == .sent || $0.status == .queued) }
+        guard !pending.isEmpty else { return }
+
+        for message in pending {
+            if message.status == .queued {
+                sendOverWire(message)
+            } else {
+                ensureAckWaitTask(for: message.id)
+            }
+        }
+    }
+
     /// Encode and send a single message over BLE, then mark as sent.
     private func sendOverWire(_ message: Message) {
         let packet = WirePacket.message(MessagePayload(from: message))
@@ -231,23 +247,38 @@ final class ChatViewModel: ObservableObject {
         ackWaitTasks[messageID] = Task { [weak self] in
             guard let self else { return }
 
-            // Retry a few times if we don't see an ACK (receiver dedups by UUID).
-            for _ in 0..<3 {
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
+            // Keep retrying (with gentle backoff) until ACK arrives or the message disappears.
+            // Receiver dedups by UUID, so resends are safe.
+            let delays: [UInt64] = [
+                4_000_000_000,
+                6_000_000_000,
+                10_000_000_000,
+                15_000_000_000
+            ]
+
+            var attempt = 0
+            while !Task.isCancelled {
+                let delay = delays[min(attempt, delays.count - 1)]
+                try? await Task.sleep(nanoseconds: delay)
 
                 if Task.isCancelled { return }
                 guard let msg = self.messages.first(where: { $0.id == messageID }) else { return }
                 if msg.status == .delivered { return }
 
-                guard self.connectedPeerCount > 0 else { continue }
+                guard self.connectedPeerCount > 0 else {
+                    attempt += 1
+                    continue
+                }
 
                 do {
                     let packet = WirePacket.message(MessagePayload(from: msg))
                     let data = try self.encoder.encode(packet)
                     try await self.connectivity.sendToAll(data)
                 } catch {
-                    // Keep waiting/retrying.
+                    // Ignore; we'll retry again (or on reconnect via resumePendingDeliveries()).
                 }
+
+                attempt += 1
             }
         }
     }
