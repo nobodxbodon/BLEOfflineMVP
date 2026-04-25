@@ -243,19 +243,24 @@ final class ConnectivityService: NSObject, ObservableObject {
     var displayName: String { UIDevice.current.name }
 
     private func updatePeerList() {
-        let connectedPeripheralIDs = writeTargets.keys
-            .filter { $0.state == .connected }
-            .map { $0.identifier.uuidString }
+        var peerIDs = Set<String>()
 
-        let centralCount = subscribedCentrals.count
-        connectedPeers = connectedPeripheralIDs + Array(repeating: "central", count: centralCount)
+        for peripheral in writeTargets.keys where peripheral.state == .connected {
+            peerIDs.insert(peripheral.identifier.uuidString)
+        }
 
-        if connectedPeripheralIDs.isEmpty && centralCount == 0 {
+        for central in subscribedCentrals {
+            peerIDs.insert(central.identifier.uuidString)
+        }
+
+        connectedPeers = peerIDs.sorted()
+
+        if peerIDs.isEmpty {
             connectionState = pendingPeripherals.isEmpty
                 ? (isRunning ? .searching : .idle)
                 : .connecting
         } else {
-            connectionState = .connected(peerCount: connectedPeers.count)
+            connectionState = .connected(peerCount: peerIDs.count)
         }
     }
 
