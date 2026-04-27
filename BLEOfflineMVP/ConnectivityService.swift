@@ -35,6 +35,7 @@ final class ConnectivityService: NSObject, ObservableObject {
     private static let serviceUUID = CBUUID(string: "A1B2C3D4-E5F6-7890-ABCD-EF1234567890")
     private static let writeUUID  = CBUUID(string: "A1B2C3D4-E5F6-7890-ABCD-EF1234567891")
     private static let notifyUUID = CBUUID(string: "A1B2C3D4-E5F6-7890-ABCD-EF1234567892")
+    private static let nodeIDUserDefaultsKey = "BLEOfflineMVP.nodeID"
 
     // MARK: - BLE Managers
 
@@ -53,6 +54,15 @@ final class ConnectivityService: NSObject, ObservableObject {
 
     /// Peripherals we're currently connecting to (keep strong reference).
     private var pendingPeripherals: Set<CBPeripheral> = []
+
+    /// Timeout tasks for pending connections (CoreBluetooth connect() has no built-in timeout).
+    private var pendingConnectionTimeouts: [UUID: Task<Void, Never>] = [:]
+
+    /// How long to wait for a Central connection before cancelling and retrying.
+    private static let connectionTimeoutSeconds: UInt64 = 10
+
+    /// Map a discovered peripheral instance to its advertised node ID.
+    private var peripheralNodeIDs: [UUID: UUID] = [:]
 
     /// One outstanding write at a time per peripheral (CoreBluetooth callback-driven).
     private struct PendingWrite {
@@ -80,6 +90,17 @@ final class ConnectivityService: NSObject, ObservableObject {
 
     /// Pending notify chunks when the transmit queue is full.
     private var pendingNotifyChunks: [Data] = []
+
+    /// Stable ID for this install (used to deterministically decide central vs peripheral).
+    private lazy var nodeID: UUID = {
+        if let s = UserDefaults.standard.string(forKey: Self.nodeIDUserDefaultsKey),
+           let id = UUID(uuidString: s) {
+            return id
+        }
+        let id = UUID()
+        UserDefaults.standard.set(id.uuidString, forKey: Self.nodeIDUserDefaultsKey)
+        return id
+    }()
 
     // MARK: - Connection State
 
@@ -133,10 +154,16 @@ final class ConnectivityService: NSObject, ObservableObject {
         for peripheral in writeTargets.keys {
             centralManager.cancelPeripheralConnection(peripheral)
         }
+        for peripheral in pendingPeripherals {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
         writeTargets.removeAll()
         pendingPeripherals.removeAll()
+        pendingConnectionTimeouts.values.forEach { $0.cancel() }
+        pendingConnectionTimeouts.removeAll()
         pendingWritesByPeripheralID.values.forEach { $0.timeoutTask.cancel() }
         pendingWritesByPeripheralID.removeAll()
+        peripheralNodeIDs.removeAll()
         subscribedCentrals.removeAll()
         pendingNotifyChunks.removeAll()
         connectedPeers = []
@@ -205,22 +232,33 @@ final class ConnectivityService: NSObject, ObservableObject {
         // Prefer central->peripheral writes when we have connected write targets.
         let writePeripherals = Array(writeTargets.keys).filter { $0.state == .connected }
         if !writePeripherals.isEmpty {
-            // Snapshot to avoid mutating while iterating
-            let targets = Array(writeTargets)
-            for (peripheral, characteristic) in targets {
-                guard peripheral.state == .connected else { continue }
+            do {
+                // Snapshot to avoid mutating while iterating
+                let targets = Array(writeTargets)
+                for (peripheral, characteristic) in targets {
+                    guard peripheral.state == .connected else { continue }
 
-                let maxLen = max(20, peripheral.maximumWriteValueLength(for: .withResponse))
-                if framedData.count > maxLen {
-                    var offset = 0
-                    while offset < framedData.count {
-                        let end = min(offset + maxLen, framedData.count)
-                        let chunk = Data(framedData[offset..<end])
-                        try await writeChunk(chunk, to: peripheral, characteristic: characteristic)
-                        offset = end
+                    let maxLen = max(20, peripheral.maximumWriteValueLength(for: .withResponse))
+                    if framedData.count > maxLen {
+                        var offset = 0
+                        while offset < framedData.count {
+                            let end = min(offset + maxLen, framedData.count)
+                            let chunk = Data(framedData[offset..<end])
+                            try await writeChunk(chunk, to: peripheral, characteristic: characteristic)
+                            offset = end
+                        }
+                    } else {
+                        try await writeChunk(framedData, to: peripheral, characteristic: characteristic)
                     }
+                }
+            } catch {
+                // Write path failed (stale GATT / first-run race). Fall back to notify
+                // path if we have subscribed centrals, otherwise propagate the error.
+                if !subscribedCentrals.isEmpty {
+                    print("[BLE] Write failed, falling back to notify path")
+                    sendNotifyFramed(framedData)
                 } else {
-                    try await writeChunk(framedData, to: peripheral, characteristic: characteristic)
+                    throw error
                 }
             }
         } else {
@@ -247,24 +285,48 @@ final class ConnectivityService: NSObject, ObservableObject {
     var displayName: String { UIDevice.current.name }
 
     private func updatePeerList() {
-        var peerIDs = Set<String>()
+        // This app is strictly 2-user. Treat "any active link" as 1 peer.
+        let hasAnyLink = writeTargets.keys.contains(where: { $0.state == .connected }) || !subscribedCentrals.isEmpty
+        connectedPeers = hasAnyLink ? ["peer"] : []
 
-        for peripheral in writeTargets.keys where peripheral.state == .connected {
-            peerIDs.insert(peripheral.identifier.uuidString)
-        }
-
-        for central in subscribedCentrals {
-            peerIDs.insert(central.identifier.uuidString)
-        }
-
-        connectedPeers = peerIDs.sorted()
-
-        if peerIDs.isEmpty {
+        if !hasAnyLink {
             connectionState = pendingPeripherals.isEmpty
                 ? (isRunning ? .searching : .idle)
                 : .connecting
         } else {
-            connectionState = .connected(peerCount: peerIDs.count)
+            connectionState = .connected(peerCount: 1)
+        }
+    }
+
+    private func dataFromUUID(_ uuid: UUID) -> Data {
+        var u = uuid.uuid
+        return Data(bytes: &u, count: MemoryLayout.size(ofValue: u))
+    }
+
+    private func manufacturerDataForNodeID(_ nodeID: UUID) -> Data {
+        // 0xFFFF is a "test" company identifier often used in prototypes.
+        // Payload: [companyID (2 bytes little-endian)] + [16 bytes UUID]
+        var data = Data()
+        data.append(0xFF)
+        data.append(0xFF)
+        data.append(dataFromUUID(nodeID))
+        return data
+    }
+
+    private func nodeIDFromManufacturerData(_ data: Data) -> UUID? {
+        guard data.count >= 18 else { return nil }
+        let uuidData = data.dropFirst(2)
+        return uuidFromData(Data(uuidData.prefix(16)))
+    }
+
+    private func uuidFromData(_ data: Data) -> UUID? {
+        guard data.count == 16 else { return nil }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return nil }
+            let bytes = base.assumingMemoryBound(to: UInt8.self)
+            let tuple: uuid_t = (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                                 bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15])
+            return UUID(uuid: tuple)
         }
     }
 
@@ -282,7 +344,8 @@ final class ConnectivityService: NSObject, ObservableObject {
 
     private func writeChunk(_ data: Data, to peripheral: CBPeripheral, characteristic: CBCharacteristic) async throws {
         // If the remote side closes/reopens, CoreBluetooth can keep a "connected" object that never ACKs writes.
-        // On timeout we forcefully cancel the connection and rely on scan+rediscover to heal.
+        // On timeout we drop the stale characteristic and re-discover services so the next
+        // attempt gets a fresh reference. We do NOT disconnect — the link is still live.
         let peripheralID = peripheral.identifier
 
         // Enforce one outstanding write per peripheral.
@@ -295,11 +358,18 @@ final class ConnectivityService: NSObject, ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
                 guard let pending = self.pendingWritesByPeripheralID.removeValue(forKey: peripheralID) else { return }
 
-                // Hard reset only this link (no global flapping).
+                // Drop the stale write target but keep the connection alive.
+                // Re-discover services to get a fresh characteristic reference.
                 self.writeTargets.removeValue(forKey: peripheral)
-                self.pendingPeripherals.remove(peripheral)
                 self.updatePeerList()
-                self.centralManager.cancelPeripheralConnection(peripheral)
+
+                if peripheral.state == .connected {
+                    print("[BLE] Write timed out — re-discovering services on \(peripheralID.uuidString)")
+                    peripheral.discoverServices([Self.serviceUUID])
+                } else {
+                    self.pendingPeripherals.remove(peripheral)
+                    self.centralManager.cancelPeripheralConnection(peripheral)
+                }
 
                 pending.continuation.resume(throwing: ConnectivityError.writeTimeout)
             }
@@ -314,7 +384,6 @@ final class ConnectivityService: NSObject, ObservableObject {
     }
 
     private func sendNotifyFramed(_ framedData: Data) {
-        guard !subscribedCentrals.isEmpty else { return }
         guard notifyCharacteristic != nil else { return }
 
         // CoreBluetooth doesn't always expose a reliable max update length across SDKs/sims.
@@ -338,7 +407,6 @@ final class ConnectivityService: NSObject, ObservableObject {
         guard !pendingNotifyChunks.isEmpty else { return }
         guard notifyCharacteristic != nil else { return }
         guard !subscribedCentrals.isEmpty else {
-            pendingNotifyChunks.removeAll()
             return
         }
 
@@ -409,6 +477,10 @@ extension ConnectivityService: CBCentralManagerDelegate {
             // Keep internal state clean; stale CBPeripheral instances can linger across app restarts.
             self.pruneDisconnectedWriteTargets()
 
+            // NOTE: iOS does not support CBAdvertisementDataManufacturerDataKey in
+            // CBPeripheralManager advertising (silently ignored). Both devices always
+            // connect as Central to each other — this is intentional and works fine.
+
             // Skip if already connected or connecting
             guard self.writeTargets[peripheral] == nil,
                   !self.pendingPeripherals.contains(peripheral) else { return }
@@ -426,12 +498,32 @@ extension ConnectivityService: CBCentralManagerDelegate {
             self.pendingPeripherals.insert(peripheral)
             self.connectionState = .connecting
             central.connect(peripheral, options: nil)
+
+            // CoreBluetooth connect() has NO built-in timeout. If the handshake hangs,
+            // the peripheral stays in pendingPeripherals forever, blocking all future
+            // connection attempts. Add our own timeout to cancel and retry.
+            let peripheralID = peripheral.identifier
+            self.pendingConnectionTimeouts[peripheralID]?.cancel()
+            self.pendingConnectionTimeouts[peripheralID] = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: Self.connectionTimeoutSeconds * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                // Only act if this peripheral is still pending (no didConnect/didFailToConnect yet)
+                guard self.pendingPeripherals.contains(peripheral) else { return }
+                print("[BLE] Connection timed out for \(name) — cancelling and will retry on next discovery")
+                self.pendingPeripherals.remove(peripheral)
+                self.pendingConnectionTimeouts.removeValue(forKey: peripheralID)
+                self.centralManager.cancelPeripheralConnection(peripheral)
+                self.updatePeerList()
+            }
         }
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Task { @MainActor in
             print("[BLE] Connected to peripheral: \(peripheral.name ?? peripheral.identifier.uuidString)")
+            // Cancel the connection timeout — handshake completed successfully
+            self.pendingConnectionTimeouts[peripheral.identifier]?.cancel()
+            self.pendingConnectionTimeouts.removeValue(forKey: peripheral.identifier)
             peripheral.delegate = self
             peripheral.discoverServices([Self.serviceUUID])
         }
@@ -441,6 +533,8 @@ extension ConnectivityService: CBCentralManagerDelegate {
                                      didFailToConnect peripheral: CBPeripheral, error: Error?) {
         Task { @MainActor in
             print("[BLE] Failed to connect: \(error?.localizedDescription ?? "unknown")")
+            self.pendingConnectionTimeouts[peripheral.identifier]?.cancel()
+            self.pendingConnectionTimeouts.removeValue(forKey: peripheral.identifier)
             self.pendingPeripherals.remove(peripheral)
             self.updatePeerList()
         }
@@ -532,6 +626,29 @@ extension ConnectivityService: CBPeripheralDelegate {
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                 didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                                 error: Error?) {
+        Task { @MainActor in
+            guard characteristic.uuid == Self.notifyUUID else { return }
+            if let error {
+                print("[BLE] Notify state error: \(error.localizedDescription)")
+                return
+            }
+
+            if characteristic.isNotifying {
+                print("[BLE] Notify subscribed for \(peripheral.identifier.uuidString)")
+            } else {
+                // iOS can occasionally drop the notify state during reconnects; retry once.
+                print("[BLE] Notify not active, retrying subscribe for \(peripheral.identifier.uuidString)")
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    peripheral.setNotifyValue(true, for: characteristic)
+                }
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
                                  didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         Task { @MainActor in
             let peripheralID = peripheral.identifier
@@ -580,6 +697,9 @@ extension ConnectivityService: CBPeripheralManagerDelegate {
             self.serviceAdded = true
             peripheral.startAdvertising([
                 CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID],
+                // Include a stable node ID so both devices deterministically pick ONE central.
+                // Use Manufacturer Data instead of Service Data (Service Data is not allowed in some runtimes).
+                CBAdvertisementDataManufacturerDataKey: self.manufacturerDataForNodeID(self.nodeID),
                 CBAdvertisementDataLocalNameKey: UIDevice.current.name
             ])
             print("[BLE] Service added, advertising started")

@@ -23,7 +23,7 @@ struct ContentView: View {
                 // Compose bar
                 composeBar
             }
-            .navigationTitle("BLE Chat")
+            .navigationTitle(appTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -32,6 +32,11 @@ struct ContentView: View {
             }
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var appTitle: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        return "BLE Chat (v\(version))"
     }
 
     // MARK: - Message List
