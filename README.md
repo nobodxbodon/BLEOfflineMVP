@@ -1,4 +1,4 @@
-测试文档 [在此](文档/BLE_Offline_MVP_Test_Scenarios.pdf)，初步设想 [在此](文档/设想)。欢迎意见建议与任何问题。
+上下文请见 [threads](https://www.threads.com/@wuxuan153) 最早的第一二条。测试文档 [在此](文档/BLE_Offline_MVP_Test_Scenarios.pdf)，初步设想 [在此](文档/设想)。欢迎意见建议与任何问题。
 
 ## 测试遇过问题
 
