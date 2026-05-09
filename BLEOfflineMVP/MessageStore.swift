@@ -73,21 +73,21 @@ final class MessageStore {
     }
 
     /// Update the status of a message by id.
-    func updateStatus(id: UUID, to status: Message.DeliveryStatus) -> [Message] {
+    func updateStatus(id: UUID, to status: Message.发送状态) -> [Message] {
         var messages = loadMessages()
         if let idx = messages.firstIndex(where: { $0.id == id }) {
-            messages[idx].status = status
+            messages[idx].状态 = status
             saveMessages(messages)
         }
         return messages
     }
 
     /// Update status for multiple message ids at once.
-    func updateStatuses(ids: [UUID], to status: Message.DeliveryStatus) -> [Message] {
+    func updateStatuses(ids: [UUID], to status: Message.发送状态) -> [Message] {
         var messages = loadMessages()
         let idSet = Set(ids)
         for i in messages.indices where idSet.contains(messages[i].id) {
-            messages[i].status = status
+            messages[i].状态 = status
         }
         saveMessages(messages)
         return messages
@@ -95,6 +95,6 @@ final class MessageStore {
 
     /// Return only messages with `.queued` status (outbox).
     func queuedMessages() -> [Message] {
-        return loadMessages().filter { $0.status == .queued }
+        return loadMessages().filter { $0.状态 == .queued }
     }
 }
