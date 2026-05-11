@@ -36,7 +36,7 @@ struct ContentView: View {
 
     private var appTitle: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        return "BLE Chat (v\(version))"
+        return "布聊 v\(version)"
     }
 
     // MARK: - Message List
@@ -51,7 +51,11 @@ struct ContentView: View {
                     Text("请发帖")
                         .font(.title2)
                         .fontWeight(.semibold)
+<<<<<<< HEAD
                     Text("它将送给身边人")
+=======
+                    Text("输入文字。\n它将在他人靠近时发送。")
+>>>>>>> d2a384bb3e814ca7991e3bbad7176661c2f1eb3b
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -126,7 +130,7 @@ struct MessageBubble: View {
             VStack(alignment: message.isMine ? .trailing : .leading, spacing: 4) {
                 // Sender name (only for received messages)
                 if !message.isMine {
-                    Text(message.senderName)
+                    Text(message.作者姓名)
                         .font(.caption2)
                         .fontWeight(.semibold)
                         .foregroundColor(.secondary)
@@ -147,7 +151,7 @@ struct MessageBubble: View {
 
                 // Timestamp + status
                 HStack(spacing: 4) {
-                    Text(message.timestamp, style: .time)
+                    Text(message.时间戳, style: .time)
                         .font(.caption2)
                         .foregroundColor(.gray)
 
@@ -163,7 +167,7 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var statusIcon: some View {
-        switch message.status {
+        switch message.状态 {
         case .queued:
             Image(systemName: "clock")
                 .font(.caption2)

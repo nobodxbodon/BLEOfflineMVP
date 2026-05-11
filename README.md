@@ -1,12 +1,9 @@
-上下文请见 [threads](https://www.threads.com/@wuxuan153) 最早的第一二条。测试文档 [在此](文档/BLE_Offline_MVP_Test_Scenarios.pdf)，初步设想 [在此](文档/设想)。欢迎意见建议与任何问题。
+# Hope to Make the World a Freer place
 
-## 测试遇过问题
+My posts got deleted on almost every social platform I used. There's hardly pure speech freedom anywhere.
 
-### Bundle Identifier
+This app would at least allow the possibility of your voice to be heard by those who want to listen, no matter how it sounds or how little the chance is. No wifi or internet needed, just pure bluetooth. There's no plan to use any encryption, as those who dare to speak out won't mind being found.
 
-改为 `com.cc.blemvp.BLEOfflineMVP` 后，构建成功，并可加载到手机，分别为 iphone 14 with ios 26.3.1(a), and iphone xr with ios 18.7.7
-。
+I did some tests with the current prototype and it works within at least 30 feet in the house, with walls in between. Hope it works better in open spaces. Yet to try other scenarios like when cars are waiting at traffic lights, passing each other, or in one moving vehicle, train or even plane.
 
-### 支持无wifi环境
-
-可以关闭wifi，应该仍正常运行。
+Please see the [test document]((文档/BLE_Offline_MVP_Test_Scenarios.pdf)), with [hand-written Chinese design draft](文档/设想).

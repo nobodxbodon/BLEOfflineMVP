@@ -114,9 +114,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Update status of a message in-place without re-reading from disk.
-    private func updateMessageStatus(id: UUID, to status: Message.DeliveryStatus) {
+    private func updateMessageStatus(id: UUID, to status: Message.发送状态) {
         if let idx = messages.firstIndex(where: { $0.id == id }) {
-            messages[idx].status = status
+            messages[idx].状态 = status
             persistToDisk()
         }
     }
@@ -156,7 +156,7 @@ final class ChatViewModel: ObservableObject {
     /// Send all queued messages to connected peers.
     private func flushOutbox() {
         // Only flush truly queued. "sent" will be handled by ACK retry loop.
-        let queued = messages.filter { $0.isMine && $0.status == .queued }
+        let queued = messages.filter { $0.isMine && $0.状态 == .queued }
         guard !queued.isEmpty else { return }
 
         print("[Chat] Flushing \(queued.count) queued message(s)")
@@ -169,11 +169,11 @@ final class ChatViewModel: ObservableObject {
     private func resumePendingDeliveries() {
         // If we reconnected after a while, previously "sent" (but un-ACK'd) messages
         // must re-enter the retry loop; otherwise they can remain stuck at a green check.
-        let pending = messages.filter { $0.isMine && ($0.status == .sent || $0.status == .queued) }
+        let pending = messages.filter { $0.isMine && ($0.状态 == .sent || $0.状态 == .queued) }
         guard !pending.isEmpty else { return }
 
         for message in pending {
-            if message.status == .queued {
+            if message.状态 == .queued {
                 sendOverWire(message)
             } else {
                 ensureAckWaitTask(for: message.id)
@@ -214,7 +214,7 @@ final class ChatViewModel: ObservableObject {
             case .message(let payload):
                 let message = payload.toMessage()
                 if insertMessage(message) {
-                    print("[Chat] Received: \(message.text) from \(message.senderName)")
+                    print("[Chat] Received: \(message.text) from \(message.作者姓名)")
                 }
                 sendAck(for: payload.id)
 
@@ -263,7 +263,7 @@ final class ChatViewModel: ObservableObject {
 
                 if Task.isCancelled { return }
                 guard let msg = self.messages.first(where: { $0.id == messageID }) else { return }
-                if msg.status == .delivered { return }
+                if msg.状态 == .delivered { return }
 
                 guard self.connectedPeerCount > 0 else {
                     attempt += 1
