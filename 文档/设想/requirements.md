@@ -13,7 +13,7 @@ A and B both have the app installed.
 
 # 2. UI
 
-## 1.3 Minimum
+## 2.1 Minimum
 
 - 2.1.1 no timestamp of the post
 - 2.1.2 no id of who wrote the post
@@ -27,16 +27,16 @@ A and B both have the app installed.
 
 ## 2.2 List of Posts
  
-- 2.1.1 all the posts aligned to the right side, as most chat apps put the messages written by self on the right side
-- 2.1.2 latest post on top
-- 2.1.3 user can copy the content of a selected post
-- 2.1.4 every post is shown in full length, no matter how long it is
+- 2.2.1 all the posts aligned to the right side, as most chat apps put the messages written by self on the right side
+- 2.2.2 latest post on top
+- 2.2.3 user can copy the content of a selected post
+- 2.2.4 every post is shown in full length, no matter how long it is
 
-## 2.2 Text Input
+## 2.3 Text Input
 
-- 2.2.1 only support pure text, no support for pictures, videos, links etc
-- 2.2.2 user can paste content into it
+- 2.3.1 only support pure text, no support for pictures, videos, links etc
+- 2.3.2 user can paste content into it
 
-## 2.3 "Post" Button
+## 2.4 "Post" Button
 
-- 2.3.1 when Text Input is empty, it's disabled; otherwise it's enabled
+- 2.4.1 when Text Input is empty, it's disabled; otherwise it's enabled
