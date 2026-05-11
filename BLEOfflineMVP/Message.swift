@@ -14,14 +14,14 @@ import Foundation
 struct Message: Identifiable, Codable, Equatable {
     let id: UUID
     let text: String
-    let senderName: String      // Display name of the sender device
-    let timestamp: Date
-    var status: DeliveryStatus   // Tracks delivery state
+    let 作者姓名: String      // Display name of the sender device
+    let 时间戳: Date
+    var 状态: 发送状态   // Tracks delivery state
 
     /// Whether this message was composed on this device
     let isMine: Bool
 
-    enum DeliveryStatus: String, Codable, Equatable {
+    enum 发送状态: String, Codable, Equatable {
         case queued      // Written locally, no peer connected yet
         case sent        // Successfully sent to at least one peer
         case delivered   // Confirmed received (future use)
@@ -34,14 +34,14 @@ struct Message: Identifiable, Codable, Equatable {
         senderName: String,
         timestamp: Date = Date(),
         isMine: Bool,
-        status: DeliveryStatus
+        status: 发送状态
     ) {
         self.id = id
         self.text = text
-        self.senderName = senderName
-        self.timestamp = timestamp
+        self.作者姓名 = senderName
+        self.时间戳 = timestamp
         self.isMine = isMine
-        self.status = status
+        self.状态 = status
     }
 }
 
@@ -51,22 +51,22 @@ struct Message: Identifiable, Codable, Equatable {
 struct MessagePayload: Codable {
     let id: UUID
     let text: String
-    let senderName: String
-    let timestamp: Date
+    let 发帖人: String
+    let 时间戳: Date
 
     init(from message: Message) {
         self.id = message.id
         self.text = message.text
-        self.senderName = message.senderName
-        self.timestamp = message.timestamp
+        self.发帖人 = message.作者姓名
+        self.时间戳 = message.时间戳
     }
 
     func toMessage() -> Message {
         Message(
             id: id,
             text: text,
-            senderName: senderName,
-            timestamp: timestamp,
+            senderName: 发帖人,
+            timestamp: 时间戳,
             isMine: false,
             status: .received
         )
