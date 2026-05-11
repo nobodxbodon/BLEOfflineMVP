@@ -29,9 +29,8 @@ A and B both have the app installed.
  
 - 2.1.1 all the posts aligned to the right side, as most chat apps put the messages written by self on the right side
 - 2.1.2 latest post on top
-- 2.1.3 if a new post has the exact content, the old post will be deleted, and the new post is on top
-- 2.1.4 user can copy the content of a selected post
-- 2.1.5 every post is shown in full length, no matter how long it is
+- 2.1.3 user can copy the content of a selected post
+- 2.1.4 every post is shown in full length, no matter how long it is
 
 ## 2.2 Text Input
 
