@@ -51,11 +51,7 @@ struct ContentView: View {
                     Text("请发帖")
                         .font(.title2)
                         .fontWeight(.semibold)
-<<<<<<< HEAD
-                    Text("它将送给身边人")
-=======
                     Text("输入文字。\n它将在他人靠近时发送。")
->>>>>>> d2a384bb3e814ca7991e3bbad7176661c2f1eb3b
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
