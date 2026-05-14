@@ -10,6 +10,10 @@ This app would allow a chance for your voice to be heard by those who want to li
 
 Child at school can write down all he/she thought about during the time at school. When got home, parent can just sync with the child's posts (and the other kids' posts), instead asking all the questions. It saves both sides' time and energy. Similar with parents. Children always want to know what parents' work like.
 
+### coworkers
+
+Office gossips can be done in public, as there's no account info or timestamp. You can even create your own "secret language" to add even more fun.
+
 ### neighbors
 
 Instead of knocking on the door to ask for recent news in the neighborhood, the app gives another option to sync. Without going out of the door, you can connect with all the people living in the same building or the blocks of the same section. Same applies with the students in the school.

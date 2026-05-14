@@ -6,4 +6,4 @@ This app would at least allow the possibility of your voice to be heard by those
 
 I did some tests with the current prototype and it works within at least 30 feet in the house, with walls in between. Hope it works better in open spaces. Yet to try other scenarios like when cars are waiting at traffic lights, passing each other, or in one moving vehicle, train or even plane.
 
-Please see the [test document]((文档/BLE_Offline_MVP_Test_Scenarios.pdf)), with [hand-written Chinese design draft](文档/设想).
+Please see the [test document]((文档/BLE_Offline_MVP_Test_Scenarios.pdf)), with [my vision](文档/设想/vision.md).
