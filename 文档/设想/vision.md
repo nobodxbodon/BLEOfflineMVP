@@ -32,6 +32,12 @@ It's a pity to loss the chance to know each other because of the time and space 
 
 Instead of dropping card or packets at everyone's front yard, the broadcast happens whenever you drive by each house. Companies can just offer the latest discounts as a post.
 
+### politics
+
+A lot of money and energy is thrown into the political campaigns just to let as many people as possible to know the candidates' name and give them enought motivation to walk to the voting stations. It doesn't have to be like this.
+
+The app can help, by finding the social connections with the candidates, and by getting your view out in the open and getting others' similar or different views easily without arguing in public.
+
 ## Difference with BitChat
 
 ### Bluetooth only
