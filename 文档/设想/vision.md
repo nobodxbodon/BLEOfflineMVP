@@ -6,6 +6,10 @@ This app would allow a chance for your voice to be heard by those who want to li
 
 ## Use cases
 
+### wife and husband
+
+It can be a silent messenger between the couple. Even if you got into a cold war, you can leave a post for the other part as clues and hints. The two sides could choose to act that the messages weren't seen and try to fix the relationship simultaneously.
+
 ### child and parent
 
 Child at school can write down all he/she thought about during the time at school. When got home, parent can just sync with the child's posts (and the other kids' posts), instead asking all the questions. It saves both sides' time and energy. Similar with parents. Children always want to know what parents' work like.
